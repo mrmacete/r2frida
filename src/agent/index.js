@@ -2,6 +2,8 @@
 'use strict';
 
 const r2frida = require('./plugin'); // eslint-disable-line
+const {stalkFromTo, stalkFunction} = require('./stalker');
+
 
 /* ObjC.available is buggy on non-objc apps, so override this */
 const ObjCAvailable = ObjC && ObjC.available && ObjC.classes && typeof ObjC.classes.NSString !== 'undefined';
@@ -90,6 +92,8 @@ const commandHandlers = {
   'dt.': traceHere,
   'dt-': clearTrace,
   'dtr': traceRegs,
+  'dtS': stalkTrace,
+  'dtSf': stalkTraceFunction,
   'di': interceptHelp,
   'di0': interceptRet0,
   'di1': interceptRet1,
@@ -1236,6 +1240,58 @@ function getenv (name) {
 
 function setenv (name, value, overwrite) {
   return _setenv(Memory.allocUtf8String(name), Memory.allocUtf8String(value), overwrite ? 1 : 0);
+}
+
+function stalkTrace (args) {
+  const from = ptr(args[0]);
+  const to = ptr(args[1]);
+
+  return stalkFromTo({}, from, to);
+}
+
+function stalkTraceFunction (args) {
+  const at = ptr(args[0]);
+  const operation = stalkFunction({}, at)
+    .then((events) => {
+      return _mapBlockEvents(events, (address) => {
+        return `dt+ ${address} 1`;
+      }).join('\n');
+    });
+
+  console.log('trying to resume from inside...');
+  hostCmd('=!resume');
+  return operation;
+}
+
+function _mapBlockEvents (events, callback) {
+  const result = [];
+
+  events.forEach(([begin, end]) => {
+    let cursor = begin;
+    while (cursor < end) {
+      try {
+        const instr = Instruction.parse(cursor);
+        result.push(callback(cursor));
+        cursor = instr.next;
+      } catch (e) {
+        if (e.message !== 'invalid instruction' &&
+            e.message !== `access violation accessing ${cursor}`) {
+          throw e;
+        }
+        // skip invalid instructions
+        switch (Process.arch) {
+          case 'arm64':
+            cursor = cursor.add(4);
+          case 'arm':
+            cursor = cursor.add(2);
+          default:
+            cursor = cursor.add(1);
+        }
+      }
+    }
+  });
+
+  return result;
 }
 
 function compareRegisterNames (lhs, rhs) {
