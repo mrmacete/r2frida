@@ -2,7 +2,6 @@
 'use strict';
 
 const eventsByThread = {};
-const threadIds = new Set();
 
 module.exports = {
   stalkFromTo: stalkFromTo,
@@ -28,7 +27,6 @@ function stalkFromTo (config, from, to) {
 
       if (thisThreadId === threadId) {
         _unfollowHere();
-        threadIds.delete(Process.getCurrentThreadId());
         setTimeout(() => {
           resolve(eventsByThread[threadId]);
           delete eventsByThread[threadId];
@@ -60,7 +58,6 @@ function stalkFunction (config, address) {
 
         if (recursiveCount === 0) {
           _unfollowHere();
-          threadIds.delete(Process.getCurrentThreadId());
           hook.detach();
           setTimeout(() => {
             resolve(eventsByThread[this.hreadId]);
@@ -69,18 +66,11 @@ function stalkFunction (config, address) {
         }
       }
     });
-    console.log('HOOK DONE GO GO GO');
   });
 }
 
 function _followHere (config) {
   const threadId = Process.getCurrentThreadId();
-  if (threadIds.has(threadId)) {
-    _unfollowHere();
-    eventsByThread[threadId] = [];
-  }
-
-  threadIds.add(threadId);
 
   Stalker.follow(threadId, {
     events: _eventsFromConfig(config),
@@ -115,8 +105,10 @@ function _eventsFromConfig (config) {
     ret: false,
     exec: false,
     block: false,
-    compile: true
+    compile: false
   };
+
+  events[config.event] = true;
 
   return events;
 }

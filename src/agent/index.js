@@ -94,6 +94,7 @@ const commandHandlers = {
   'dtr': traceRegs,
   'dtS': stalkTrace,
   'dtSf': stalkTraceFunction,
+  'dtSf*': stalkTraceFunctionR2,
   'di': interceptHelp,
   'di0': interceptRet0,
   'di1': interceptRet1,
@@ -255,7 +256,12 @@ function disasm (addr, len) {
   let lastAt = null;
   let disco = '';
   for (let i = 0; i < len; i++) {
-    const op = Instruction.parse(addr);
+    const [op, next] = _tolerantInstructionParse(addr);
+    if (op === null) {
+      disco += `${addr}\tinvalid`;
+      addr = next;
+      continue;
+    }
     const ds = DebugSymbol.fromAddress(addr);
     if (ds.name !== null && ds.name !== oldName) {
       console.log(';;;', ds.moduleName, ds.name);
@@ -338,15 +344,18 @@ const traceListeners = [];
 const config = {
   'patch.code': true,
   'search.in': 'perm:r--',
-  'search.quiet': false
+  'search.quiet': false,
+  'stalker.event': 'compile'
 };
 
 const configHelp = {
   'search.in': configHelpSearchIn,
+  'stalker.event': configHelpStalkerEvent,
 };
 
 const configValidator = {
   'search.in': configValidateSearchIn,
+  'stalker.event': configValidateStalkerEvent,
 };
 
 function configHelpSearchIn () {
@@ -379,6 +388,21 @@ function configValidateSearchIn (val) {
       (x === 'x' || x === '-');
   }
   return scope === 'path';
+}
+
+function configHelpStalkerEvent () {
+  return `Specify the event to use when stalking, possible values:
+
+    call            trace calls
+    ret             trace returns
+    exec            trace every instruction
+    block           trace basic block execution (every time)
+    compile         trace basic blocks once (this is the default)
+  `;
+}
+
+function configValidateStalkerEvent (val) {
+  return ['call', 'ret', 'exec', 'block', 'compile'].indexOf(val) !== -1;
 }
 
 function evalConfig (args) {
@@ -445,8 +469,8 @@ function breakpointUnset (args) {
   if (args.length === 1) {
     if (args[0] === '*') {
       for (let k of Object.keys(breakpoints)) {
-          const bp = breakpoints[k];
-          Interceptor.revert(ptr(bp.address));
+        const bp = breakpoints[k];
+        Interceptor.revert(ptr(bp.address));
       }
       breakpoints = {};
       return 'All breakpoints removed';
@@ -1250,48 +1274,104 @@ function stalkTrace (args) {
 }
 
 function stalkTraceFunction (args) {
-  const at = ptr(args[0]);
-  const operation = stalkFunction({}, at)
-    .then((events) => {
+  return _stalkFunctionAndGetEvents(args, (isBlock, events) => {
+    if (isBlock) {
+      return _mapBlockEvents(events, (address) => {
+        return disasmOne(address);
+      }, (begin, end) => {
+        return '';
+      }).join('\n');
+    } else {
+      return events.map((event) => {
+        const location = event[0];
+        return disasmOne(location);
+      }).join('\n');
+    }
+  });
+
+  function disasmOne (address) {
+    const pd = disasm(address, 1);
+    if (pd.charAt(pd.length-1) === '\n') {
+      return pd.slice(0,-1);
+    }
+    return pd;
+  }
+}
+
+function stalkTraceFunctionR2 (args) {
+  return _stalkFunctionAndGetEvents(args, (isBlock, events) => {
+    if (isBlock) {
       return _mapBlockEvents(events, (address) => {
         return `dt+ ${address} 1`;
       }).join('\n');
+    } else {
+      return events.map((event) => {
+        const location = event[0];
+        return `dt+ ${location} 1`;
+      }).join('\n');
+    }
+  });
+}
+
+function _stalkFunctionAndGetEvents (args, eventsHandler) {
+  const at = ptr(args[0]);
+  const conf = {
+    event: config['stalker.event']
+  };
+  const isBlock = conf.event === 'block' || conf.event === 'compile';
+
+  const operation = stalkFunction(conf, at)
+    .then((events) => {
+      return eventsHandler(isBlock, events);
     });
 
-  console.log('trying to resume from inside...');
   hostCmd('=!resume');
   return operation;
 }
 
-function _mapBlockEvents (events, callback) {
+function _mapBlockEvents (events, onInstruction, onBlock) {
   const result = [];
 
   events.forEach(([begin, end]) => {
+    if (typeof onBlock === 'function') {
+      result.push(onBlock(begin, end));
+    }
     let cursor = begin;
     while (cursor < end) {
-      try {
-        const instr = Instruction.parse(cursor);
-        result.push(callback(cursor));
-        cursor = instr.next;
-      } catch (e) {
-        if (e.message !== 'invalid instruction' &&
-            e.message !== `access violation accessing ${cursor}`) {
-          throw e;
-        }
-        // skip invalid instructions
-        switch (Process.arch) {
-          case 'arm64':
-            cursor = cursor.add(4);
-          case 'arm':
-            cursor = cursor.add(2);
-          default:
-            cursor = cursor.add(1);
-        }
+      const [instr, next] = _tolerantInstructionParse(cursor);
+      if (instr !== null) {
+        result.push(onInstruction(cursor));
       }
+      cursor = next;
     }
   });
 
   return result;
+}
+
+function _tolerantInstructionParse (address) {
+  let instr = null, cursor = address;
+  try {
+    instr = Instruction.parse(cursor);
+    cursor = instr.next;
+  } catch (e) {
+    if (e.message !== 'invalid instruction' &&
+        e.message !== `access violation accessing ${cursor}`) {
+      throw e;
+    }
+    // skip invalid instructions
+    console.log(`warning: error parsing instruction @ ${cursor}`)
+    switch (Process.arch) {
+      case 'arm64':
+        cursor = cursor.add(4);
+      case 'arm':
+        cursor = cursor.add(2);
+      default:
+        cursor = cursor.add(1);
+    }
+  }
+
+  return [instr, cursor];
 }
 
 function compareRegisterNames (lhs, rhs) {
