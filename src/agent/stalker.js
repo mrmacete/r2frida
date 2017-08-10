@@ -4,37 +4,9 @@
 const eventsByThread = {};
 
 module.exports = {
-  stalkFromTo: stalkFromTo,
   stalkFunction: stalkFunction,
   unfollowAll: unfollowAll
 };
-
-function stalkFromTo (config, from, to) {
-  return new Promise((resolve, reject) => {
-    let threadId = null;
-
-    Interceptor.attach(from, function () {
-      threadId = _followHere(config);
-    });
-
-    Interceptor.attach(to, function () {
-      if (threadId === null) {
-        logWarning('ignoring unfollow happening before follow');
-        return;
-      }
-
-      const thisThreadId = Process.getCurrentThreadId();
-
-      if (thisThreadId === threadId) {
-        _unfollowHere();
-        setTimeout(() => {
-          resolve(eventsByThread[threadId]);
-          delete eventsByThread[threadId];
-        }, 1000);
-      }
-    });
-  });
-}
 
 function stalkFunction (config, address) {
   return new Promise((resolve, reject) => {

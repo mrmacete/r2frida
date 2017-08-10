@@ -92,7 +92,6 @@ const commandHandlers = {
   'dt.': traceHere,
   'dt-': clearTrace,
   'dtr': traceRegs,
-  'dtS': stalkTrace,
   'dtSf': stalkTraceFunction,
   'dtSf*': stalkTraceFunctionR2,
   'di': interceptHelp,
@@ -239,7 +238,7 @@ function disasmCode (lenstr) {
   return disasm(offset, len);
 }
 
-function disasm (addr, len) {
+function disasm (addr, len, initialOldName) {
   len = len || 20;
   if (typeof addr === 'string') {
     try {
@@ -252,7 +251,7 @@ function disasm (addr, len) {
     }
   }
   addr = ptr('' + addr);
-  let oldName = null;
+  let oldName = initialOldName || null;
   let lastAt = null;
   let disco = '';
   for (let i = 0; i < len; i++) {
@@ -264,7 +263,7 @@ function disasm (addr, len) {
     }
     const ds = DebugSymbol.fromAddress(addr);
     if (ds.name !== null && ds.name !== oldName) {
-      console.log(';;;', ds.moduleName, ds.name);
+      disco += `;;; ${ds.moduleName} ${ds.name}\n`;
       oldName = ds.name;
     }
     var comment = '';
@@ -1266,31 +1265,29 @@ function setenv (name, value, overwrite) {
   return _setenv(Memory.allocUtf8String(name), Memory.allocUtf8String(value), overwrite ? 1 : 0);
 }
 
-function stalkTrace (args) {
-  const from = ptr(args[0]);
-  const to = ptr(args[1]);
-
-  return stalkFromTo({}, from, to);
-}
-
 function stalkTraceFunction (args) {
   return _stalkFunctionAndGetEvents(args, (isBlock, events) => {
+    let previousSymbolName;
     if (isBlock) {
       return _mapBlockEvents(events, (address) => {
-        return disasmOne(address);
+        const pd = disasmOne(address, previousSymbolName);
+        previousSymbolName = DebugSymbol.fromAddress(address).name;
+        return pd;
       }, (begin, end) => {
         return '';
       }).join('\n');
     } else {
       return events.map((event) => {
         const location = event[0];
-        return disasmOne(location);
+        const pd = disasmOne(location, previousSymbolName);
+        previousSymbolName = DebugSymbol.fromAddress(address).name;
+        return pd;
       }).join('\n');
     }
   });
 
-  function disasmOne (address) {
-    const pd = disasm(address, 1);
+  function disasmOne (address, previousSymbolName) {
+    const pd = disasm(address, 1, previousSymbolName);
     if (pd.charAt(pd.length-1) === '\n') {
       return pd.slice(0,-1);
     }
@@ -1314,7 +1311,7 @@ function stalkTraceFunctionR2 (args) {
 }
 
 function _stalkFunctionAndGetEvents (args, eventsHandler) {
-  const at = ptr(args[0]);
+  const at = _decodePointer(args[0]);
   const conf = {
     event: config['stalker.event']
   };
@@ -1327,6 +1324,28 @@ function _stalkFunctionAndGetEvents (args, eventsHandler) {
 
   hostCmd('=!resume');
   return operation;
+}
+
+function _decodePointer (ptrOrSymbol) {
+  try {
+    if (ptrOrSymbol == 0) {
+      return NULL;
+    }
+
+    const mayBeNan = ptrOrSymbol;
+    if (+mayBeNan) {
+      return ptr(ptrOrSymbol);
+    }
+
+    const lookups = lookupSymbolJson([ptrOrSymbol]);
+    if (lookups.length > 0) {
+      return lookups[0].address;
+    }
+  } catch (e) {
+    console.log(e.stack);
+  }
+
+  return NULL;
 }
 
 function _mapBlockEvents (events, onInstruction, onBlock) {
